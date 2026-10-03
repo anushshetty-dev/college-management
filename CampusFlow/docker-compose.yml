@@ -1,0 +1,64 @@
+services:
+  # ── Redis Cache / OTP Store ─────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: smart_college_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  # ── FastAPI Backend ─────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smart_college_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+    env_file:
+      - ./backend/.env
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/smart_college.db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ── Next.js Frontend ────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: 331682494269-6s3e4o9aadtrr2u5sqv6fptqkmmuivlv.apps.googleusercontent.com
+    container_name: smart_college_frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_GOOGLE_CLIENT_ID=331682494269-6s3e4o9aadtrr2u5sqv6fptqkmmuivlv.apps.googleusercontent.com
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Nginx Reverse Proxy ─────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: smart_college_nginx
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+      - frontend

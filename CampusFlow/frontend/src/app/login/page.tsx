@@ -1,0 +1,780 @@
+'use client';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '../../contexts/AuthContext';
+import api from '../../lib/api';
+import Link from 'next/link';
+import { 
+  Eye, 
+  EyeOff, 
+  Mail, 
+  Lock, 
+  User as UserIcon, 
+  ArrowRight, 
+  X, 
+  Sparkles, 
+  GraduationCap, 
+  ShieldCheck, 
+  KeyRound, 
+  CheckCircle2, 
+  BookOpen, 
+  Loader2 
+} from 'lucide-react';
+import toast, { Toaster } from 'react-hot-toast';
+
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
+
+export default function Login() {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [selectedRole, setSelectedRole] = useState<'student' | 'faculty'>('student');
+  const [loading, setLoading] = useState(false);
+  const { login } = useAuth();
+  const router = useRouter();
+
+  // ── Forgot Password Modal State ─────────────────────────────
+  const [showForgotModal, setShowForgotModal] = useState(false);
+  const [forgotStep, setForgotStep] = useState<'email' | 'otp' | 'reset'>('email');
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotOtp, setForgotOtp] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+
+
+  // ── Login Email OTP 2FA State (Redis-backed) ────────────────
+  const [showLoginOtpModal, setShowLoginOtpModal] = useState(false);
+  const [loginUserId, setLoginUserId] = useState<number | null>(null);
+  const [loginMaskedEmail, setLoginMaskedEmail] = useState('');
+  const [loginOtp, setLoginOtp] = useState('');
+  const [loginOtpLoading, setLoginOtpLoading] = useState(false);
+  const [loginResendCooldown, setLoginResendCooldown] = useState(0);
+
+  // ── Google OAuth Setup ──────────────────────────────────────
+  const DEFAULT_GOOGLE_CLIENT_ID = '331682494269-6s3e4o9aadtrr2u5sqv6fptqkmmuivlv.apps.googleusercontent.com';
+  const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || DEFAULT_GOOGLE_CLIENT_ID;
+  const [tokenClient, setTokenClient] = useState<any>(null);
+
+  // Resend cooldown timer
+  useEffect(() => {
+    if (loginResendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setLoginResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loginResendCooldown]);
+
+  useEffect(() => {
+    if (!document.getElementById('google-gsi-client')) {
+      const script = document.createElement('script');
+      script.id = 'google-gsi-client';
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.onload = () => {
+        initGoogleClient();
+      };
+      document.body.appendChild(script);
+    } else {
+      initGoogleClient();
+    }
+  }, [selectedRole]);
+
+  const handleGoogleTokenResponse = async (credential: string) => {
+    setLoading(true);
+    try {
+      const res = await api.post('/api/auth/google/', { credential, role: selectedRole });
+      login(res.data.user, res.data.tokens.access, res.data.tokens.refresh);
+      toast.success(`Welcome back, ${res.data.user.username}!`);
+      if (res.data.user.role?.toLowerCase() === 'student') {
+        router.push('/student');
+      } else {
+        router.push('/teacher');
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Google sign-in failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getOrInitTokenClient = () => {
+    if (tokenClient) return tokenClient;
+    if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
+      try {
+        const client = window.google.accounts.oauth2.initTokenClient({
+          client_id: googleClientId,
+          scope: 'email profile openid',
+          callback: async (tokenResponse: any) => {
+            if (tokenResponse && tokenResponse.access_token) {
+              setLoading(true);
+              try {
+                const res = await api.post('/api/auth/google/', {
+                  access_token: tokenResponse.access_token,
+                  role: selectedRole,
+                });
+                login(res.data.user, res.data.tokens.access, res.data.tokens.refresh);
+                toast.success(`Welcome back, ${res.data.user.username}!`);
+                if (res.data.user.role?.toLowerCase() === 'student') {
+                  router.push('/student');
+                } else {
+                  router.push('/teacher');
+                }
+              } catch (err: any) {
+                toast.error(err.response?.data?.detail || 'Google sign-in failed');
+              } finally {
+                setLoading(false);
+              }
+            }
+          },
+        });
+        setTokenClient(client);
+        return client;
+      } catch (err) {
+        console.warn('Google OAuth2 init error:', err);
+      }
+    }
+    return null;
+  };
+
+  const initGoogleClient = () => {
+    if (!googleClientId) return;
+
+    // 1. One-Tap / Credential ID Token initialization
+    if (window.google?.accounts?.id) {
+      try {
+        window.google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: (response: any) => {
+            if (response.credential) {
+              handleGoogleTokenResponse(response.credential);
+            }
+          },
+        });
+      } catch (err) {
+        console.warn('Google GSI init failed:', err);
+      }
+    }
+
+    // 2. OAuth 2.0 Token Client initialization
+    getOrInitTokenClient();
+  };
+
+  const handleGoogleButtonClick = () => {
+    const client = getOrInitTokenClient();
+    if (client) {
+      client.requestAccessToken();
+      return;
+    }
+    if (window.google?.accounts?.id) {
+      window.google.accounts.id.prompt((notification: any) => {
+        if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+          setShowGmailModal(true);
+        }
+      });
+      return;
+    }
+    setShowGmailModal(true);
+  };
+
+  // ── Standard Username/Password Login with Redis OTP Verification ──
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await api.post('/api/login/', { username, password });
+      
+      // If backend requires 2FA Email OTP verification (backed by Redis)
+      if (res.data.requires_otp) {
+        setLoginUserId(res.data.user_id);
+        setLoginMaskedEmail(res.data.email || 'your registered email');
+        setShowLoginOtpModal(true);
+        setLoginOtp('');
+        setLoginResendCooldown(60);
+        toast.success(res.data.message || 'Verification code sent to your email');
+        return;
+      }
+
+      // Direct login if no OTP required
+      login(res.data.user, res.data.tokens.access, res.data.tokens.refresh);
+      toast.success('Login successful!');
+      if (res.data.user.role?.toLowerCase() === 'student') {
+        router.push('/student');
+      } else {
+        router.push('/teacher');
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || err.response?.data?.message || 'Login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyLoginOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginOtp || loginOtp.trim().length < 6) {
+      toast.error('Please enter the 6-digit verification code');
+      return;
+    }
+    setLoginOtpLoading(true);
+    try {
+      const res = await api.post('/api/verify-login-otp/', {
+        user_id: loginUserId,
+        otp: loginOtp.trim(),
+      });
+      login(res.data.user, res.data.tokens.access, res.data.tokens.refresh);
+      toast.success(`Welcome back, ${res.data.user.username}!`);
+      setShowLoginOtpModal(false);
+      if (res.data.user.role?.toLowerCase() === 'student') {
+        router.push('/student');
+      } else {
+        router.push('/teacher');
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Invalid or expired verification code');
+    } finally {
+      setLoginOtpLoading(false);
+    }
+  };
+
+  const handleResendLoginOtp = async () => {
+    if (loginResendCooldown > 0 || !loginUserId) return;
+    try {
+      const res = await api.post('/api/resend-login-otp/', { user_id: loginUserId });
+      toast.success(res.data.message || 'New verification code sent!');
+      setLoginResendCooldown(60);
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Failed to resend code');
+    }
+  };
+
+
+  // ── Forgot Password Handlers ────────────────────────────────
+  const handleSendForgotOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotEmail) {
+      toast.error('Please enter your email');
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await api.post('/api/forgot-password/', { email: forgotEmail });
+      toast.success('Password reset OTP sent to your email!');
+      setForgotStep('otp');
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Failed to send reset OTP');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleVerifyForgotOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotOtp) {
+      toast.error('Please enter the 6-digit OTP');
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await api.post('/api/verify-otp/', { email: forgotEmail, otp: forgotOtp });
+      toast.success('OTP verified successfully!');
+      setForgotStep('reset');
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Invalid OTP code');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPassword || newPassword.length < 6) {
+      toast.error('Password must be at least 6 characters');
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await api.post('/api/reset-password/', {
+        email: forgotEmail,
+        otp: forgotOtp,
+        new_password: newPassword,
+      });
+      toast.success('Password reset successfully! Please login.');
+      setShowForgotModal(false);
+      setForgotStep('email');
+      setForgotEmail('');
+      setForgotOtp('');
+      setNewPassword('');
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Failed to reset password');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#f8fafc] text-slate-800 flex items-center justify-center p-4 sm:p-6 lg:p-10 relative overflow-hidden font-sans">
+      <Toaster position="top-right" />
+
+      {/* ── Ambient Background Glow Orbs ──────────────────────────── */}
+      <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-emerald-100/70 rounded-full blur-[140px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-teal-100/70 rounded-full blur-[140px] pointer-events-none" />
+
+      {/* ── Main Split Container ────────────────────────────────────── */}
+      <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-12 gap-8 items-center relative z-10">
+
+        {/* ── Left Side: Brand & Feature Highlights ──────────────────── */}
+        <div className="lg:col-span-6 hidden lg:flex flex-col justify-center space-y-8 pr-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 p-[1.5px] shadow-sm shadow-emerald-500/20">
+              <div className="w-full h-full rounded-[14px] bg-white flex items-center justify-center">
+                <GraduationCap size={26} className="text-[#059669]" />
+              </div>
+            </div>
+            <div>
+              <span className="font-black text-2xl tracking-tight text-slate-900">
+                Campus<span className="text-[#059669]">Flow</span>
+              </span>
+              <p className="text-xs font-bold text-emerald-700 tracking-wider uppercase">
+                Academic Operating System
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <h1 className="text-4xl lg:text-5xl font-black text-slate-900 leading-tight tracking-tight">
+              Elevate Your <br />
+              <span className="bg-clip-text text-transparent bg-gradient-to-r from-[#059669] via-emerald-600 to-teal-600">
+                College Experience
+              </span>
+            </h1>
+            <p className="text-slate-600 text-sm leading-relaxed max-w-md">
+              Secure institutional access with instant class notes distribution, Groq LPU powered academic AI, and semester-scoped doubt clearing channels.
+            </p>
+          </div>
+
+          {/* Feature Badges */}
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-white border border-slate-200/90 shadow-xs">
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-[#059669] flex items-center justify-center shrink-0 border border-emerald-100">
+                <Sparkles size={18} />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-900">Sub-Second NexusAI Assistant</p>
+                <p className="text-[11px] text-slate-500">Deep semantic search over verified subject syllabus</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-white border border-slate-200/90 shadow-xs">
+              <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center shrink-0 border border-teal-100">
+                <BookOpen size={18} />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-900">Semester-Isolated Study Notes</p>
+                <p className="text-[11px] text-slate-500">Verified syllabus materials and faculty resources</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-white border border-slate-200/90 shadow-xs">
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-[#059669] flex items-center justify-center shrink-0 border border-emerald-100">
+                <ShieldCheck size={18} />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-900">Strict Role Verification</p>
+                <p className="text-[11px] text-slate-500">Institutional Single Sign-On and security</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs font-bold text-[#059669] pt-1">
+            <span className="w-2 h-2 rounded-full bg-[#059669] animate-pulse" />
+            <span>Campus Network Online • 2026 Academic Edition</span>
+          </div>
+        </div>
+
+        {/* ── Right Side: Modern White + Green Login Card ────────────── */}
+        <div className="lg:col-span-6 w-full">
+          <div className="bg-white rounded-3xl p-6 sm:p-9 border border-slate-200/90 shadow-xl relative overflow-hidden">
+            {/* Top Emerald Accent Strip */}
+            <div className="absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-[#059669]" />
+
+            {/* Mobile Header */}
+            <div className="lg:hidden flex items-center gap-2.5 mb-6">
+              <div className="w-9 h-9 rounded-xl bg-[#059669] flex items-center justify-center text-white">
+                <GraduationCap size={20} />
+              </div>
+              <div>
+                <span className="font-extrabold text-lg text-slate-900">CampusFlow</span>
+                <span className="text-[10px] text-emerald-700 block -mt-1 font-bold">Smart College</span>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-[#065f46] mb-2 shadow-xs">
+                <ShieldCheck size={13} className="text-[#059669]" />
+                <span>Institutional Portal</span>
+              </div>
+              <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                Sign In to Account
+              </h2>
+              <p className="text-slate-500 text-xs mt-1">
+                Enter your credentials or authenticate via Google OAuth
+              </p>
+            </div>
+
+            {/* Role Switcher Pill */}
+            <div className="grid grid-cols-2 p-1 bg-slate-100/80 border border-slate-200 rounded-2xl mb-6">
+              <button
+                type="button"
+                onClick={() => setSelectedRole('student')}
+                className={`py-2 text-xs font-bold rounded-xl transition-all duration-200 flex items-center justify-center gap-2 ${
+                  selectedRole === 'student'
+                    ? 'bg-[#059669] text-white shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <GraduationCap size={15} />
+                <span>Student</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedRole('faculty')}
+                className={`py-2 text-xs font-bold rounded-xl transition-all duration-200 flex items-center justify-center gap-2 ${
+                  selectedRole === 'faculty'
+                    ? 'bg-[#059669] text-white shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ShieldCheck size={15} />
+                <span>Faculty / Teacher</span>
+              </button>
+            </div>
+
+            {/* Login Form */}
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wider">
+                  Username
+                </label>
+                <div className="relative">
+                  <UserIcon size={16} className="absolute left-4 top-3.5 text-slate-400" />
+                  <input
+                    type="text"
+                    required
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Enter your username"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-900 placeholder-slate-400 rounded-2xl pl-11 pr-4 py-3 text-sm font-medium focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setForgotStep('email');
+                      setShowForgotModal(true);
+                    }}
+                    className="text-xs text-[#059669] hover:text-[#047857] transition font-bold"
+                  >
+                    Forgot password?
+                  </button>
+                </div>
+                <div className="relative">
+                  <Lock size={16} className="absolute left-4 top-3.5 text-slate-400" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-900 placeholder-slate-400 rounded-2xl pl-11 pr-11 py-3 text-sm font-medium focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3.5 top-3.5 text-slate-400 hover:text-slate-700 transition"
+                    aria-label="Toggle password visibility"
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-3.5 px-4 rounded-2xl bg-[#059669] hover:bg-[#047857] text-white font-bold text-sm shadow-md shadow-emerald-600/25 hover:shadow-emerald-600/40 transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 size={17} className="animate-spin" />
+                    <span>Signing in...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Sign In as {selectedRole === 'student' ? 'Student' : 'Faculty'}</span>
+                    <ArrowRight size={16} />
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* Divider */}
+            <div className="relative my-6 text-center">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-200" />
+              </div>
+              <span className="relative px-3 bg-white text-slate-500 text-[11px] font-bold uppercase tracking-wider">
+                Or continue with
+              </span>
+            </div>
+
+            {/* Google OAuth Button */}
+            <button
+              type="button"
+              onClick={handleGoogleButtonClick}
+              className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 text-sm font-bold text-slate-700 shadow-xs hover:shadow-sm transition"
+            >
+              <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                <path
+                  fill="#4285F4"
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                />
+              </svg>
+              <span>Continue with Google</span>
+            </button>
+
+            {/* Bottom Register Prompt */}
+            <p className="mt-6 text-center text-xs text-slate-500">
+              Don&apos;t have an account?{' '}
+              <Link href="/register" className="font-bold text-[#059669] hover:text-[#047857] transition">
+                Create an account →
+              </Link>
+            </p>
+          </div>
+        </div>
+
+      </div>
+
+      {/* ── Redis Login Email Verification Modal (2FA) ──────────────── */}
+      {showLoginOtpModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full border border-slate-200 shadow-2xl relative">
+            <button
+              onClick={() => setShowLoginOtpModal(false)}
+              className="absolute top-5 right-5 p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+            >
+              <X size={20} />
+            </button>
+
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-100 flex items-center justify-center text-[#059669]">
+                <ShieldCheck size={26} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Email Verification</h3>
+                <p className="text-xs text-slate-500">Secure two-step verification</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 mb-5 leading-relaxed">
+              We just sent a 6-digit verification code to your registered email{' '}
+              <span className="font-bold text-[#059669] bg-emerald-50 px-1.5 py-0.5 rounded-md border border-emerald-100">
+                {loginMaskedEmail}
+              </span>
+              . Please enter it below to complete sign in.
+            </p>
+
+            <form onSubmit={handleVerifyLoginOtp} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wider">
+                  6-Digit Verification Code
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <KeyRound size={18} />
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    autoFocus
+                    value={loginOtp}
+                    onChange={(e) => setLoginOtp(e.target.value.replace(/\D/g, ''))}
+                    placeholder="• • • • • •"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-900 rounded-2xl pl-11 pr-4 py-3 text-lg font-mono tracking-widest text-center outline-none focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loginOtpLoading || loginOtp.length < 6}
+                className="w-full py-3.5 rounded-2xl bg-[#059669] hover:bg-[#047857] text-white font-bold text-sm shadow-md transition disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {loginOtpLoading ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Verifying Code...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Verify & Continue</span>
+                    <ArrowRight size={16} />
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs">
+              <button
+                type="button"
+                onClick={handleResendLoginOtp}
+                disabled={loginResendCooldown > 0}
+                className="font-bold text-[#059669] hover:text-[#047857] disabled:text-slate-400 disabled:cursor-not-allowed transition"
+              >
+                {loginResendCooldown > 0 ? `Resend Code (${loginResendCooldown}s)` : 'Resend Code'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowLoginOtpModal(false)}
+                className="text-slate-500 hover:text-slate-800 transition"
+              >
+                Cancel / Back
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Forgot Password Modal ───────────────────────────────────── */}
+      {showForgotModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full border border-slate-200 shadow-2xl relative">
+            <button
+              onClick={() => setShowForgotModal(false)}
+              className="absolute top-5 right-5 p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+            >
+              <X size={18} />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-[#059669] border border-emerald-200 flex items-center justify-center">
+                <KeyRound size={20} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Reset Password</h3>
+                <p className="text-xs text-slate-500">Step {forgotStep === 'email' ? '1 of 3' : forgotStep === 'otp' ? '2 of 3' : '3 of 3'}</p>
+              </div>
+            </div>
+
+            {forgotStep === 'email' && (
+              <form onSubmit={handleSendForgotOtp} className="space-y-4">
+                <p className="text-xs text-slate-600">
+                  Enter your registered email address and we&apos;ll send you a 6-digit verification code.
+                </p>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wider">Email Address</label>
+                  <input
+                    type="email"
+                    required
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    placeholder="user@gmail.com"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-2xl px-4 py-2.5 text-sm outline-none focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full py-3 rounded-2xl bg-[#059669] hover:bg-[#047857] text-white font-bold text-xs shadow-md transition disabled:opacity-50"
+                >
+                  {forgotLoading ? 'Sending Code...' : 'Send Verification OTP'}
+                </button>
+              </form>
+            )}
+
+            {forgotStep === 'otp' && (
+              <form onSubmit={handleVerifyForgotOtp} className="space-y-4">
+                <p className="text-xs text-slate-600">
+                  Enter the 6-digit OTP code sent to <span className="text-[#059669] font-bold">{forgotEmail}</span>:
+                </p>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wider">6-Digit OTP</label>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    required
+                    value={forgotOtp}
+                    onChange={(e) => setForgotOtp(e.target.value)}
+                    placeholder="123456"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-2xl px-4 py-2.5 text-sm text-center font-mono tracking-widest outline-none focus:bg-white focus:border-emerald-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full py-3 rounded-2xl bg-[#059669] hover:bg-[#047857] text-white font-bold text-xs shadow-md transition disabled:opacity-50"
+                >
+                  {forgotLoading ? 'Verifying...' : 'Verify OTP Code'}
+                </button>
+              </form>
+            )}
+
+            {forgotStep === 'reset' && (
+              <form onSubmit={handleResetPassword} className="space-y-4">
+                <p className="text-xs text-slate-600">
+                  Enter your new password below (minimum 6 characters):
+                </p>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5 uppercase tracking-wider">New Password</label>
+                  <input
+                    type="password"
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-2xl px-4 py-2.5 text-sm outline-none focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full py-3 rounded-2xl bg-[#059669] hover:bg-[#047857] text-white font-bold text-xs shadow-md transition disabled:opacity-50"
+                >
+                  {forgotLoading ? 'Saving...' : 'Set New Password & Login'}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+
+    </div>
+  );
+}
